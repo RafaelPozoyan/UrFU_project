@@ -89,3 +89,51 @@ def run_cv(make, X, y, splits):
         oof[te], fold[te] = p, i
         rows.append((roc_auc_score(y[te], p), average_precision_score(y[te], p), lift_at(y[te], p)))
     return pd.DataFrame(rows, columns=['auc', 'pr', 'lift10']), oof, fold
+
+
+# ---------- восстановление клиентов и история на момент решения ----------
+def with_dates(raw, year):
+    """Копия raw с датой звонка (год восстановлен по порядку строк) и без NaN в job/education."""
+    d = raw.copy()
+    d['date'] = pd.to_datetime(dict(year=year, month=raw.month.map(MONTHS), day=raw.day_of_week))
+    for c in ['job', 'education']: d[c] = d[c].fillna('unknown')
+    return d
+
+
+def link_clients(d):
+    """Для строки с pdays>0 ищем прошлую запись того же клиента: дата = date - pdays, тот же профиль,
+    проверка campaign_old + previous_old == previous_new. Возвращает индекс прошлой записи (-1 если нет)."""
+    from collections import defaultdict
+    keys = defaultdict(list)
+    for i, k in enumerate(zip(d.date, d.job, d.marital, d.education, d.default)): keys[k].append(i)
+    prev = np.full(len(d), -1)
+    for i in np.where(d.pdays.values > 0)[0]:
+        gap = int(d.pdays.iat[i]); dt = d.date.iat[i] - pd.Timedelta(days=gap)
+        cand = [j for j in keys.get((dt, d.job.iat[i], d.marital.iat[i], d.education.iat[i], d.default.iat[i]), [])
+                if j < i and 0 <= d.age.iat[i] - d.age.iat[j] <= gap // 365 + 1]
+        if not cand: continue
+        ok = [j for j in cand if d.campaign.iat[j] + d.previous.iat[j] == d.previous.iat[i]]
+        if len(cand) == 1: prev[i] = cand[0]
+        elif len(ok) == 1: prev[i] = ok[0]
+        elif len(ok) > 1: prev[i] = min(ok, key=lambda j: abs(d.balance.iat[j] - d.balance.iat[i]))
+    return prev
+
+
+def history_features(d, y, prev):
+    """Что известно о клиенте НА МОМЕНТ звонка: идём по цепочке прошлых записей (все строго раньше по дате)."""
+    n = len(d); dt = d.date.values; rows = []
+    for i in range(n):
+        j = prev[i]; depth = nb = 0; last_buy = np.nan
+        while j >= 0:
+            depth += 1; nb += y[j]
+            if y[j] == 1 and np.isnan(last_buy): last_buy = (dt[i] - dt[j]) / np.timedelta64(1, 'D')
+            j = prev[j]
+        rows.append((depth, nb, int(nb > 0), last_buy))
+    return pd.DataFrame(rows, columns=['h_depth', 'h_n_buys', 'h_ever_bought', 'h_days_since_buy'])
+
+
+def final_features(raw, year, y):
+    """Финальный набор: без duration, без прокси периода, без campaign + история клиента."""
+    X = build(raw, drop=NP_DROP + ['campaign', 'campaign_clip'])
+    d = with_dates(raw, year)
+    return pd.concat([X, history_features(d, y, link_clients(d))], axis=1)
