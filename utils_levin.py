@@ -137,3 +137,11 @@ def final_features(raw, year, y):
     X = build(raw, drop=NP_DROP + ['campaign', 'campaign_clip'])
     d = with_dates(raw, year)
     return pd.concat([X, history_features(d, y, link_clients(d))], axis=1)
+
+
+def client_groups(prev):
+    """Id клиента = компонента связности по ссылкам «запись -> прошлая запись» (для групповой валидации)."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = len(prev); i = np.where(prev >= 0)[0]
+    return connected_components(coo_matrix((np.ones(len(i)), (i, prev[i])), shape=(n, n)), directed=False)[1]
